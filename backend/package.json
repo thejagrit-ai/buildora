@@ -5,6 +5,7 @@
   "type": "commonjs",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "postinstall": "prisma generate",
     "dev:db": "node scripts/dev-db.mjs",
     "build": "prisma generate && tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
