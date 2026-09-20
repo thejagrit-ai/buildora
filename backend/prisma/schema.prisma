@@ -1,0 +1,1326 @@
+// Reality CRM — PostgreSQL schema.
+// Conventions:
+//  - All monetary fields are BigInt paise (INR subunit). Never floats.
+//  - All timestamps UTC. `createdAt`/`updatedAt` everywhere.
+//  - Multi-project: domain rows carry projectId where relevant.
+//  - Soft ownership for row-level security via ownerId / assignedAgentId.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  RBAC, USERS, AUDIT
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum RoleName {
+  SUPER_ADMIN
+  CRM_ADMIN
+  SALES_AGENT
+  CHANNEL_PARTNER
+  PROJECT_MANAGER
+  FINANCE
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum MembershipStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+  REMOVED
+}
+
+enum PermissionScope {
+  ORGANIZATION
+  PROJECT
+  TEAM
+  ASSIGNED
+  OWNED
+}
+
+// Organizations are the tenant boundary. Tenant identity is resolved from an
+// authenticated membership on the server; it is never accepted from a client.
+model Organization {
+  id          String             @id @default(uuid())
+  name        String
+  slug        String             @unique
+  status      OrganizationStatus @default(ACTIVE)
+  settings    Json               @default("{}")
+  memberships Membership[]
+  organizationRoles OrganizationRole[]
+  users       User[]             @relation("DefaultOrganization")
+  projects    Project[]
+  leads       Lead[]
+  accounts    Account[]
+  opportunities Opportunity[]
+  siteVisits  SiteVisit[]
+  campaigns   Campaign[]
+  campaignSources CampaignSource[]
+  campaignResponses CampaignResponse[]
+  units       InventoryUnit[]
+  quotations  Quotation[]
+  bookings    Booking[]
+  coApplicants CoApplicant[]
+  demands     DemandSchedule[]
+  receipts    Receipt[]
+  documents   Document[]
+  notifications Notification[]
+  auditLogs   AuditLog[]
+  contacts Contact[]
+  leadActivities LeadActivity[]
+  opportunityActivities OpportunityActivity[]
+  visitFeedbacks VisitFeedback[]
+  towers Tower[]
+  priceRevisions PriceRevision[]
+  quotationLineItems QuotationLineItem[]
+  bookingApprovals BookingApproval[]
+  paymentPlans PaymentPlan[]
+  paymentPlanMilestones PaymentPlanMilestone[]
+  receiptAllocations ReceiptAllocation[]
+  savedReports SavedReport[]
+  dashboardWidgets DashboardWidget[]
+  systemConfigs SystemConfig[]
+  notificationTemplates NotificationTemplate[]
+  customFieldDefinitions CustomFieldDefinition[]
+  customFieldValues CustomFieldValue[]
+  leadRoutingRules LeadRoutingRule[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+}
+
+// A user can safely participate in more than one builder organization. Role
+// assignment belongs to the membership, not the global user identity.
+model Membership {
+  id             String           @id @default(uuid())
+  organizationId String
+  userId         String
+  roleId         String
+  organizationRoleId String?
+  status         MembershipStatus @default(ACTIVE)
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           Role             @relation(fields: [roleId], references: [id])
+  organizationRole OrganizationRole? @relation(fields: [organizationRoleId], references: [id])
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  @@unique([organizationId, userId])
+  @@index([userId, status])
+  @@index([organizationId, status])
+  @@index([organizationRoleId])
+}
+
+model Role {
+  id          String           @id @default(uuid())
+  name        RoleName         @unique
+  label       String
+  description String?
+  permissions RolePermission[]
+  users       User[]
+  memberships Membership[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+}
+
+model Permission {
+  id        String           @id @default(uuid())
+  // dot-namespaced, e.g. "leads.read", "bookings.cancel"
+  key       String           @unique
+  label     String
+  module    String
+  roles     RolePermission[]
+  organizationRoles OrganizationRolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model OrganizationRole {
+  id             String                       @id @default(uuid())
+  organizationId String
+  key            String
+  label          String
+  description    String?
+  isSystem       Boolean                      @default(false)
+  organization   Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  permissions    OrganizationRolePermission[]
+  memberships    Membership[]
+  createdAt      DateTime                     @default(now())
+  updatedAt      DateTime                     @updatedAt
+
+  @@unique([organizationId, key])
+  @@index([organizationId, isSystem])
+}
+
+model OrganizationRolePermission {
+  roleId       String
+  permissionId String
+  scope        PermissionScope  @default(ORGANIZATION)
+  role         OrganizationRole @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission       @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+}
+
+model User {
+  id            String    @id @default(uuid())
+  name          String
+  email         String    @unique
+  phone         String?
+  passwordHash  String
+  roleId        String
+  role          Role      @relation(fields: [roleId], references: [id])
+  defaultOrganizationId String?
+  defaultOrganization   Organization? @relation("DefaultOrganization", fields: [defaultOrganizationId], references: [id])
+  memberships   Membership[]
+  isActive      Boolean   @default(true)
+  timezone      String    @default("Asia/Kolkata")
+  // Channel-partner users link to their CP account for portal scoping.
+  partnerAccountId String?
+  partnerAccount   Account? @relation("PartnerUser", fields: [partnerAccountId], references: [id])
+
+  lastLoginAt   DateTime?
+  failedLoginCount Int       @default(0)
+  lockedUntil   DateTime?
+  refreshTokens RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+
+  // Ownership back-relations
+  ownedLeads          Lead[]          @relation("LeadOwner")
+  ownedAccounts       Account[]       @relation("AccountOwner")
+  ownedOpportunities  Opportunity[]   @relation("OpportunityOwner")
+  siteVisits          SiteVisit[]     @relation("VisitAgent")
+  bookings            Booking[]       @relation("BookingAgent")
+  quotations          Quotation[]     @relation("QuotationOwner")
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  savedReports        SavedReport[]
+  dashboardWidgets    DashboardWidget[]
+  campaigns           Campaign[]      @relation("CampaignOwner")
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([roleId])
+  @@index([partnerAccountId])
+  @@index([defaultOrganizationId])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId, expiresAt])
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  STATUS_CHANGE
+  LOGIN
+  EXPORT
+}
+
+// Append-only. No updates/deletes are ever issued against this table.
+model AuditLog {
+  id        String      @id @default(uuid())
+  userId    String?
+  user      User?       @relation(fields: [userId], references: [id])
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  action    AuditAction
+  module    String
+  entity    String
+  entityId  String?
+  oldValue  Json?
+  newValue  Json?
+  ip        String?
+  createdAt DateTime    @default(now())
+
+  @@index([module, entity, entityId])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([organizationId, createdAt])
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  type      String
+  title     String
+  body      String
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+  @@index([organizationId, createdAt])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CAMPAIGNS
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum SegmentType {
+  RESIDENTIAL
+  COMMERCIAL
+  MIXED
+}
+
+enum CampaignType {
+  DIGITAL
+  PRINT
+  EVENTS
+  REFERRAL
+  CHANNEL_PARTNER
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+model Campaign {
+  id           String         @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  name         String
+  type         CampaignType
+  status       CampaignStatus @default(DRAFT)
+  segment      SegmentType
+  startDate    DateTime
+  endDate      DateTime?
+  budgetPaise  BigInt         @default(0)
+  actualSpendPaise BigInt     @default(0)
+  projectId    String?
+  project      Project?       @relation(fields: [projectId], references: [id])
+  ownerId      String
+  owner        User           @relation("CampaignOwner", fields: [ownerId], references: [id])
+
+  sources      CampaignSource[]
+  responses    CampaignResponse[]
+  leads        Lead[]
+  opportunities Opportunity[]
+
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@index([status])
+  @@index([projectId])
+}
+
+enum SourceChannel {
+  GOOGLE_ADS
+  FACEBOOK
+  INSTAGRAM
+  EMAIL
+  WALK_IN
+  REFERRAL
+  BROKER
+  OTHER
+}
+
+model CampaignSource {
+  id         String        @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  campaignId String
+  campaign   Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  channel    SourceChannel
+  utmSource  String?
+  utmMedium  String?
+  utmCampaign String?
+  utmContent String?
+  utmTerm    String?
+  leads      Lead[]
+  responses  CampaignResponse[]
+  createdAt  DateTime      @default(now())
+
+  @@index([campaignId])
+  @@index([organizationId, channel])
+}
+
+// Raw inbound responses (web form / ad click) before lead qualification.
+model CampaignResponse {
+  id         String          @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  campaignId String
+  campaign   Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  sourceId   String?
+  source     CampaignSource? @relation(fields: [sourceId], references: [id])
+  payload    Json
+  leadId     String?
+  createdAt  DateTime        @default(now())
+
+  @@index([campaignId])
+  @@index([organizationId, createdAt])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  LEADS
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum LeadStage {
+  NEW
+  CONTACTED
+  QUALIFIED
+  SITE_VISIT_SCHEDULED
+  NEGOTIATION
+  CONVERTED
+  LOST
+}
+
+model Lead {
+  id              String     @id @default(uuid())
+  organizationId  String?
+  organization    Organization? @relation(fields: [organizationId], references: [id])
+  name            String
+  mobile          String
+  email           String?
+  stage           LeadStage  @default(NEW)
+  score           Int        @default(0)
+
+  // Property interest
+  interestType    SegmentType?
+  bhk             String?
+  budgetMinPaise  BigInt?
+  budgetMaxPaise  BigInt?
+  preferredLocation String?
+
+  // Project interest & structured geo. Captured up-front (before conversion) so
+  // the lead-routing engine can assign the right salesperson by project / city.
+  projectId       String?
+  city            String?
+
+  // Source attribution — a lead must trace back to a campaign source.
+  campaignId      String?
+  campaign        Campaign?       @relation(fields: [campaignId], references: [id])
+  sourceId        String?
+  source          CampaignSource? @relation(fields: [sourceId], references: [id])
+  sourceChannel   SourceChannel   @default(OTHER)
+
+  // External correlation (e.g. Salesforce Lead Id) for partner-portal sync.
+  sfLeadId        String?
+
+  ownerId         String
+  owner           User       @relation("LeadOwner", fields: [ownerId], references: [id])
+
+  // SLA
+  firstContactAt  DateTime?
+  slaBreached     Boolean    @default(false)
+
+  // Conversion / loss
+  convertedAt     DateTime?
+  accountId       String?
+  account         Account?   @relation(fields: [accountId], references: [id])
+  opportunityId   String?
+  lostReason      String?
+
+  activities      LeadActivity[]
+  siteVisits      SiteVisit[]
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([stage])
+  @@index([ownerId])
+  @@index([mobile])
+  @@index([email])
+  @@index([campaignId])
+  @@index([projectId])
+  @@index([sfLeadId])
+}
+
+enum ActivityType {
+  CALL
+  EMAIL
+  WHATSAPP
+  NOTE
+  STAGE_CHANGE
+  TASK
+  SMS
+}
+
+model LeadActivity {
+  id        String       @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  leadId    String
+  lead      Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  type      ActivityType
+  summary   String
+  detail    String?
+  meta      Json?
+  createdById String
+  createdAt DateTime     @default(now())
+
+  @@index([leadId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ACCOUNTS & CONTACTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum AccountType {
+  INDIVIDUAL
+  CORPORATE
+  CHANNEL_PARTNER
+  INVESTOR
+}
+
+enum KycStatus {
+  PENDING
+  SUBMITTED
+  VERIFIED
+  REJECTED
+}
+
+enum EmpanelmentStatus {
+  NOT_REQUIRED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model Account {
+  id            String      @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  name          String
+  type          AccountType
+  pan           String?
+  gstin         String?
+  addressLine   String?
+  city          String?
+  state         String?
+  pincode       String?
+  commPreference String?    // email / sms / call / whatsapp
+  kycStatus     KycStatus   @default(PENDING)
+
+  ownerId       String
+  owner         User        @relation("AccountOwner", fields: [ownerId], references: [id])
+
+  // Channel-partner specific
+  empanelmentStatus EmpanelmentStatus @default(NOT_REQUIRED)
+  empanelmentDate   DateTime?
+  commissionPercent Decimal?          @db.Decimal(5, 2)
+
+  contacts      Contact[]
+  documents     Document[]
+  leads         Lead[]
+  opportunities Opportunity[]
+  bookings      Booking[]
+  quotations    Quotation[]
+  partnerUsers  User[]      @relation("PartnerUser")
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([type])
+  @@index([ownerId])
+  @@index([pan])
+}
+
+model Contact {
+  id        String   @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name      String
+  mobile    String?
+  email     String?
+  isPrimary Boolean  @default(false)
+  relation  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([accountId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  OPPORTUNITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum OpportunityStage {
+  PROSPECT
+  QUALIFIED
+  SITE_VISIT_DONE
+  NEGOTIATION
+  VERBAL_COMMIT
+  WON
+  LOST
+}
+
+model Opportunity {
+  id              String           @id @default(uuid())
+  organizationId  String?
+  organization    Organization?    @relation(fields: [organizationId], references: [id])
+  name            String
+  accountId       String
+  account         Account          @relation(fields: [accountId], references: [id])
+  projectId       String
+  project         Project          @relation(fields: [projectId], references: [id])
+  unitId          String?
+  unit            InventoryUnit?   @relation(fields: [unitId], references: [id])
+
+  stage           OpportunityStage @default(PROSPECT)
+  probability     Int              @default(10)
+  expectedCloseAt DateTime?
+  dealValuePaise  BigInt           @default(0)
+
+  ownerId         String
+  owner           User             @relation("OpportunityOwner", fields: [ownerId], references: [id])
+  // Co-ownership (split commission)
+  coOwnerId       String?
+
+  campaignId      String?
+  campaign        Campaign?        @relation(fields: [campaignId], references: [id])
+
+  competitorNotes String?
+  lostReason      String?
+  lostCompetitor  String?
+  lastActivityAt  DateTime?
+
+  activities      OpportunityActivity[]
+  quotations      Quotation[]
+  siteVisits      SiteVisit[]
+  booking         Booking?
+
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([stage])
+  @@index([ownerId])
+  @@index([projectId])
+  @@index([accountId])
+}
+
+model OpportunityActivity {
+  id            String      @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  opportunityId String
+  opportunity   Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+  type          ActivityType
+  summary       String
+  detail        String?
+  createdById   String
+  createdAt     DateTime    @default(now())
+
+  @@index([opportunityId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SITE VISITS
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum VisitStatus {
+  SCHEDULED
+  CONFIRMED
+  COMPLETED
+  NO_SHOW
+  CANCELLED
+}
+
+model SiteVisit {
+  id            String       @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  leadId        String?
+  lead          Lead?        @relation(fields: [leadId], references: [id])
+  opportunityId String?
+  opportunity   Opportunity? @relation(fields: [opportunityId], references: [id])
+  projectId     String
+  project       Project      @relation(fields: [projectId], references: [id])
+  unitId        String?
+  unit          InventoryUnit? @relation(fields: [unitId], references: [id])
+
+  scheduledAt   DateTime
+  status        VisitStatus  @default(SCHEDULED)
+  agentId       String
+  agent         User         @relation("VisitAgent", fields: [agentId], references: [id])
+  transport     String?      // cab / self
+  isWalkIn      Boolean      @default(false)
+  reminderSent  Boolean      @default(false)
+
+  feedback      VisitFeedback?
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([agentId])
+  @@index([projectId])
+  @@index([scheduledAt])
+  @@index([status])
+}
+
+model VisitFeedback {
+  id              String    @id @default(uuid())
+  organizationId  String?
+  organization    Organization? @relation(fields: [organizationId], references: [id])
+  visitId         String    @unique
+  visit           SiteVisit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+  rating          Int       // 1-5
+  interestedUnits String?
+  budgetConfirmed Boolean   @default(false)
+  nextAction      String?
+  remarks         String?
+  createdAt       DateTime  @default(now())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  INVENTORY
+// ═══════════════════════════════════════════════════════════════════════════
+
+model Project {
+  id            String       @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  name          String
+  type          SegmentType
+  location      String
+  reraNumber    String?
+  launchDate    DateTime?
+  possessionDate DateTime?
+  totalUnits    Int          @default(0)
+  amenities     String[]     @default([])
+
+  towers        Tower[]
+  units         InventoryUnit[]
+  documents     Document[]
+  campaigns     Campaign[]
+  opportunities Opportunity[]
+  siteVisits    SiteVisit[]
+  bookings      Booking[]
+  priceRevisions PriceRevision[]
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+}
+
+model Tower {
+  id           String          @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  projectId    String
+  project      Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name         String
+  floors       Int             @default(0)
+  unitsPerFloor Int            @default(0)
+  units        InventoryUnit[]
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@index([projectId])
+}
+
+enum UnitType {
+  ONE_BHK
+  TWO_BHK
+  THREE_BHK
+  FOUR_BHK
+  STUDIO
+  OFFICE
+  RETAIL
+  PLOT
+}
+
+enum UnitStatus {
+  AVAILABLE
+  BLOCKED
+  BOOKED
+  REGISTERED
+  CANCELLED
+}
+
+model InventoryUnit {
+  id              String     @id @default(uuid())
+  organizationId  String?
+  organization    Organization? @relation(fields: [organizationId], references: [id])
+  projectId       String
+  project         Project    @relation(fields: [projectId], references: [id])
+  towerId         String
+  tower           Tower      @relation(fields: [towerId], references: [id])
+
+  unitNumber      String
+  floor           Int
+  type            UnitType
+  superBuiltUpArea Decimal   @db.Decimal(10, 2)   // sqft
+  carpetArea      Decimal    @db.Decimal(10, 2)   // sqft (RERA disclosure)
+  facing          String?
+
+  // Pricing components (paise)
+  basePricePerSqftPaise BigInt @default(0)
+  plcChargesPaise       BigInt @default(0)
+  floorRiseChargesPaise BigInt @default(0)
+  carParkingChargesPaise BigInt @default(0)
+
+  status          UnitStatus @default(AVAILABLE)
+
+  // Hold / block
+  holdById        String?
+  holdReason      String?
+  holdExpiresAt   DateTime?
+
+  opportunities   Opportunity[]
+  siteVisits      SiteVisit[]
+  booking         Booking?
+  priceRevisions  PriceRevision[]
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@unique([towerId, unitNumber])
+  @@index([projectId])
+  @@index([status])
+}
+
+model PriceRevision {
+  id          String        @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  projectId   String
+  project     Project       @relation(fields: [projectId], references: [id])
+  unitId      String?
+  unit        InventoryUnit? @relation(fields: [unitId], references: [id])
+  field       String        // which price component
+  oldValuePaise BigInt
+  newValuePaise BigInt
+  effectiveAt DateTime
+  revisedById String
+  createdAt   DateTime      @default(now())
+
+  @@index([projectId])
+  @@index([unitId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  QUOTATIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum QuotationStatus {
+  DRAFT
+  SENT
+  VIEWED
+  ACCEPTED
+  REVISED
+  EXPIRED
+  DECLINED
+}
+
+model Quotation {
+  id              String          @id @default(uuid())
+  organizationId  String?
+  organization    Organization?   @relation(fields: [organizationId], references: [id])
+  quoteNumber     String          @unique
+  version         Int             @default(1)
+  opportunityId   String?
+  opportunity     Opportunity?    @relation(fields: [opportunityId], references: [id])
+  accountId       String
+  account         Account         @relation(fields: [accountId], references: [id])
+  unitId          String?
+  ownerId         String
+  owner           User            @relation("QuotationOwner", fields: [ownerId], references: [id])
+
+  status          QuotationStatus @default(DRAFT)
+  validUntil      DateTime?
+
+  // Discount
+  discountType    String?         // FLAT / PERCENT / SCHEME
+  discountValue   Decimal?        @db.Decimal(12, 2)
+  discountApprovedById String?
+
+  // Computed totals (paise) — snapshotted from line items
+  subtotalPaise   BigInt          @default(0)
+  gstPaise        BigInt          @default(0)
+  totalPaise      BigInt          @default(0)
+
+  sentAt          DateTime?
+  viewedAt        DateTime?
+  acceptedAt      DateTime?
+
+  lineItems       QuotationLineItem[]
+  booking         Booking?
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([status])
+  @@index([opportunityId])
+  @@index([accountId])
+}
+
+model QuotationLineItem {
+  id          String    @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  quotationId String
+  quotation   Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  label       String    // BSP / PLC / Floor Rise / Parking / Club House / Infra / Stamp Duty
+  category    String
+  quantity    Decimal   @default(1) @db.Decimal(12, 2)
+  ratePaise   BigInt    @default(0)
+  amountPaise BigInt    @default(0)
+  gstRate     Decimal   @default(0) @db.Decimal(5, 2)
+  gstPaise    BigInt    @default(0)
+  isInformational Boolean @default(false) // e.g. stamp duty estimate
+  sortOrder   Int       @default(0)
+
+  @@index([quotationId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  BOOKINGS
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum BookingStatus {
+  INITIATED
+  AMOUNT_RECEIVED
+  AGREEMENT_SENT
+  AGREEMENT_SIGNED
+  CONFIRMED
+  CANCELLED
+}
+
+model Booking {
+  id              String        @id @default(uuid())
+  organizationId  String?
+  organization    Organization? @relation(fields: [organizationId], references: [id])
+  bookingNumber   String        @unique
+  accountId       String
+  account         Account       @relation(fields: [accountId], references: [id])
+  unitId          String        @unique
+  unit            InventoryUnit @relation(fields: [unitId], references: [id])
+  projectId       String
+  project         Project       @relation(fields: [projectId], references: [id])
+  opportunityId   String?       @unique
+  opportunity     Opportunity?  @relation(fields: [opportunityId], references: [id])
+  quotationId     String?       @unique
+  quotation       Quotation?    @relation(fields: [quotationId], references: [id])
+
+  agentId         String
+  agent           User          @relation("BookingAgent", fields: [agentId], references: [id])
+  channelPartnerId String?      // Account id of CP
+
+  status          BookingStatus @default(INITIATED)
+  bookingDate     DateTime      @default(now())
+  bookingAmountPaise BigInt     @default(0)
+  totalValuePaise BigInt        @default(0)
+  paymentMode     String?
+
+  // Cancellation
+  cancelledAt        DateTime?
+  cancellationReason String?
+  cancellationChargesPaise BigInt?
+  refundStatus       String?
+
+  // Commission
+  commissionPaise BigInt?
+
+  coApplicants    CoApplicant[]
+  documents       Document[]
+  demands         DemandSchedule[]
+  receipts        Receipt[]
+  approvals       BookingApproval[]
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([status])
+  @@index([accountId])
+  @@index([agentId])
+  @@index([projectId])
+}
+
+model CoApplicant {
+  id        String  @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  bookingId String
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  name      String
+  pan       String?
+  aadhaar   String?
+  relation  String?
+  share     Decimal? @db.Decimal(5, 2)
+
+  @@index([bookingId])
+  @@index([organizationId])
+}
+
+// Dual-approval workflow for cancellations (CRM Admin + Finance).
+model BookingApproval {
+  id         String   @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  bookingId  String
+  booking    Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  kind       String   // CANCELLATION / AMENDMENT
+  approverRole RoleName
+  approvedById String?
+  status     String   @default("PENDING") // PENDING / APPROVED / REJECTED
+  remarks    String?
+  createdAt  DateTime @default(now())
+  decidedAt  DateTime?
+
+  @@index([bookingId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  DEMAND & RECEIPT
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum DemandStatus {
+  PENDING
+  SENT
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+}
+
+model PaymentPlan {
+  id          String              @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  name        String
+  kind        String              // CONSTRUCTION_LINKED / TIME_LINKED / CUSTOM
+  description String?
+  milestones  PaymentPlanMilestone[]
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+}
+
+model PaymentPlanMilestone {
+  id        String      @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  planId    String
+  plan      PaymentPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  label     String      // On booking / On foundation / On slab / On possession
+  percent   Decimal     @db.Decimal(5, 2)
+  sortOrder Int         @default(0)
+
+  @@index([planId])
+}
+
+model DemandSchedule {
+  id            String       @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  demandNumber  String       @unique
+  bookingId     String
+  booking       Booking      @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  milestoneLabel String
+  status        DemandStatus @default(PENDING)
+  dueDate       DateTime
+  amountPaise   BigInt       @default(0)
+  gstPaise      BigInt       @default(0)
+  totalPaise    BigInt       @default(0)
+  paidPaise     BigInt       @default(0)
+  sentAt        DateTime?
+
+  receipts      ReceiptAllocation[]
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@index([bookingId])
+  @@index([status])
+  @@index([dueDate])
+}
+
+enum PaymentMode {
+  NEFT
+  RTGS
+  CHEQUE
+  UPI
+  DD
+  CASH
+}
+
+model Receipt {
+  id            String      @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  receiptNumber String      @unique   // sequential, tamper-evident
+  sequence      Int         @unique   // monotonic counter
+  bookingId     String
+  booking       Booking     @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  amountPaise   BigInt
+  gstPaise      BigInt      @default(0)
+  mode          PaymentMode
+  bankReference String?
+  receivedAt    DateTime    @default(now())
+  remarks       String?
+
+  // Cheque dishonour tracking
+  isDishonoured Boolean     @default(false)
+  dishonourReason String?
+  reissuedReceiptId String?
+
+  allocations   ReceiptAllocation[]
+
+  createdById   String
+  createdAt     DateTime    @default(now())
+
+  @@index([bookingId])
+}
+
+// Allocates a receipt (or part of it) against a demand.
+model ReceiptAllocation {
+  id          String         @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  receiptId   String
+  receipt     Receipt        @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  demandId    String
+  demand      DemandSchedule @relation(fields: [demandId], references: [id], onDelete: Cascade)
+  amountPaise BigInt
+
+  @@index([receiptId])
+  @@index([demandId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  DOCUMENTS (S3-backed, polymorphic)
+// ═══════════════════════════════════════════════════════════════════════════
+
+model Document {
+  id          String   @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  // polymorphic owner
+  accountId   String?
+  account     Account? @relation(fields: [accountId], references: [id])
+  bookingId   String?
+  booking     Booking? @relation(fields: [bookingId], references: [id])
+  projectId   String?
+  project     Project? @relation(fields: [projectId], references: [id])
+
+  category    String   // KYC / AGREEMENT / CHEQUE / NOC / BROCHURE / FLOOR_PLAN / RERA
+  fileName    String
+  s3Key       String
+  mimeType    String
+  sizeBytes   Int      @default(0)
+  version     Int      @default(1)
+  uploadedById String
+  createdAt   DateTime @default(now())
+
+  @@index([accountId])
+  @@index([bookingId])
+  @@index([projectId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  REPORTS & DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════
+
+model SavedReport {
+  id         String   @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  ownerId    String
+  owner      User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name       String
+  module     String
+  definition Json     // fields, filters, groupBy, aggregates
+  schedule   String?  // cron-ish: daily / weekly / monthly
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+model DashboardWidget {
+  id        String   @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  widgetKey String
+  layout    Json     // {x,y,w,h}
+  config    Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SETTINGS / CONFIG (key-value, tenant-wide)
+// ═══════════════════════════════════════════════════════════════════════════
+
+model SystemConfig {
+  id             String        @id @default(uuid())
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  key            String
+  value          Json
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+}
+
+model NotificationTemplate {
+  id        String   @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  key       String
+  channel   String   // EMAIL / SMS
+  subject   String?
+  body      String   // Handlebars-style variables
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, key])
+  @@index([organizationId, channel])
+}
+
+// ── Custom fields (admin-defined, metadata-driven) ───────────────────────────
+// Lets a Super Admin add fields to core objects at runtime without DB migrations.
+// Definitions describe the field; values store one entry per (field, record).
+
+enum CustomObjectType {
+  ACCOUNT
+  OPPORTUNITY
+  LEAD
+  SITE_VISIT
+}
+
+enum CustomFieldType {
+  TEXT
+  TEXTAREA
+  NUMBER
+  CURRENCY
+  PERCENT
+  CHECKBOX
+  DATE
+  DATETIME
+  EMAIL
+  PHONE
+  URL
+  PICKLIST
+}
+
+model CustomFieldDefinition {
+  id          String             @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  objectType  CustomObjectType
+  label       String
+  apiName     String             // unique per object; used as the value key
+  fieldType   CustomFieldType
+  required    Boolean            @default(false)
+  options     Json?              // PICKLIST: string[] of allowed values
+  helpText    String?
+  order       Int                @default(0)
+  active      Boolean            @default(true)
+  createdById String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  values      CustomFieldValue[]
+
+  @@unique([organizationId, objectType, apiName])
+  @@index([objectType, active])
+  @@index([organizationId, objectType, active])
+}
+
+model CustomFieldValue {
+  id        String                @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  fieldId   String
+  field     CustomFieldDefinition @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  recordId  String                // UUID of the Account/Lead/Opportunity/SiteVisit
+  value     Json?                 // typed on read/write per the field's fieldType
+  updatedAt DateTime              @updatedAt
+
+  @@unique([fieldId, recordId])
+  @@index([recordId])
+  @@index([organizationId, recordId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  LEAD ROUTING (assign incoming leads to the right salesperson / team)
+// ═══════════════════════════════════════════════════════════════════════════
+// Ordered, first-match-wins rules. Each rule's conditions (project / campaign /
+// source channel / geography) are ANDed; an unset condition is a wildcard. The
+// matching rule routes the lead either to one named salesperson (SPECIFIC_USER)
+// or to a team pool, picking the least-loaded member (ROUND_ROBIN). Evaluated by
+// lib/leadRouting.ts on both the authenticated and partner-intake create paths.
+
+enum RoutingStrategy {
+  SPECIFIC_USER // route to a single named salesperson (targetUserId)
+  ROUND_ROBIN   // route to the least-loaded active member of the pool (memberIds)
+}
+
+model LeadRoutingRule {
+  id            String          @id @default(uuid())
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id])
+  name          String
+  description   String?
+  priority      Int             @default(0) // lower = evaluated first
+  active        Boolean         @default(true)
+
+  // Conditions — every set condition must match (AND); an unset one is a wildcard.
+  projectId     String?
+  campaignId    String?
+  sourceChannel SourceChannel?
+  locations     String[]        @default([]) // case-insensitive substring match on the lead's city / preferred location
+
+  // Target
+  strategy      RoutingStrategy @default(ROUND_ROBIN)
+  targetUserId  String? // SPECIFIC_USER: the salesperson who receives the lead
+  memberIds     String[]        @default([]) // ROUND_ROBIN: the team pool to balance across
+
+  createdById   String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  @@index([active, priority])
+}

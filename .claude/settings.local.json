@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(ls node_modules/.prisma/client/index.d.ts)",
+      "Bash(ls node_modules/.bin/tsc)",
+      "Bash(grep -iE \"^\\(hammer|key-round|scroll-text|sliders-horizontal|git-branch|file-signature|user-check|handshake|x-circle|boxes|wallet|alert-triangle|megaphone|bar-chart|clock|map-pin|credit-card|mail|users|download|plus|trash-2\\)\\\\.js$\")",
+      "Bash(npm install *)",
+      "PowerShell(Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{N='UsedGB';E={[math]::Round\\($_.Used/1GB,1\\)}}, @{N='FreeGB';E={[math]::Round\\($_.Free/1GB,2\\)}} | Format-Table -AutoSize)",
+      "Bash(ls node_modules/@prisma)",
+      "Bash(cd \"D:\\\\Data\\\\Projects\\\\Reality CRM\\\\backend\")",
+      "Bash(export TEMP=/d/npm-tmp TMP=/d/npm-tmp)",
+      "Bash(npx prisma *)",
+      "Bash(cd \"D:\\\\Data\\\\Projects\\\\Reality CRM\\\\frontend\")",
+      "Bash(npm run *)",
+      "Bash(DATABASE_URL=postgresql://u:p@localhost:5432/db JWT_ACCESS_SECRET=smoketest_secret_123 JWT_REFRESH_SECRET=smoketest_secret_456 node -e ' *)",
+      "Read(//d/npm-tmp/**)",
+      "Bash(echo \"tsc exit=$?\")",
+      "Bash(NODE_ENV=production DATABASE_URL=postgresql://u:p@localhost:5432/db JWT_ACCESS_SECRET=smoketest_secret_123 JWT_REFRESH_SECRET=smoketest_secret_456 node -e ' *)",
+      "Bash(echo \"node exit=$?\")",
+      "Bash(export TEMP=/d/npm-tmp TMP=/d/npm-tmp NPM_CONFIG_CACHE=/d/npm-cache)",
+      "Bash(echo \"install exit=$?\")",
+      "Bash(tail -4 /d/npm-tmp/testdeps.txt)"
+    ]
+  },
+  "skillOverrides": {
+    "frontend-design": "name-only"
+  }
+}
